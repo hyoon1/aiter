@@ -438,6 +438,130 @@ def validate_and_update_archs():
     return archs
 
 
+def get_ck_tile_bfloat16_supported_modes(ck_dir: str) -> set[str]:
+    config_path = os.path.join(ck_dir, "include", "ck_tile", "core", "config.hpp")
+    try:
+        with open(config_path, "r", encoding="utf-8") as f:
+            config_text = f.read()
+    except OSError:
+        # Older vendored CK revisions only define modes 0-4.
+        return {"0", "1", "2", "3", "4"}
+
+    supported_modes = set(
+        re.findall(
+            r"^#define\s+CK_TILE_FLOAT_TO_BFLOAT16_[A-Z0-9_]+\s+(\d+)\s*$",
+            config_text,
+            re.MULTILINE,
+        )
+    )
+    if not supported_modes:
+        raise RuntimeError(
+            f"Failed to detect CK tile BF16 conversion modes from {config_path}."
+        )
+    return supported_modes
+
+
+def _iter_blob_gen_cmds(blob_gen_cmd) -> list[str]:
+    if isinstance(blob_gen_cmd, list):
+        return [cmd for cmd in blob_gen_cmd if cmd]
+    return [blob_gen_cmd] if blob_gen_cmd else []
+
+
+def _uses_ck_fmha_codegen(blob_gen_cmd) -> bool:
+    return any(
+        "example/ck_tile/01_fmha/generate.py" in cmd
+        for cmd in _iter_blob_gen_cmds(blob_gen_cmd)
+    )
+
+
+def _has_rdna_ck_targets(targets: list[str]) -> bool:
+    return any(target.startswith(("gfx11", "gfx12")) for target in targets)
+
+
+def _replace_define_flag(flags: list[str], define_key: str, value: str) -> list[str]:
+    prefix = f"-D{define_key}="
+    replaced = False
+    updated_flags = []
+    for flag in flags:
+        if flag.startswith(prefix):
+            updated_flags.append(f"{prefix}{value}")
+            replaced = True
+        else:
+            updated_flags.append(flag)
+    if not replaced:
+        updated_flags.append(f"{prefix}{value}")
+    return updated_flags
+
+
+def get_generated_rdna_bfloat16_override(
+    targets: list[str], ck_dir: str
+) -> Optional[str]:
+    if os.environ.get("CK_TILE_FLOAT_TO_BFLOAT16_DEFAULT") is not None:
+        return None
+    if not _has_rdna_ck_targets(targets):
+        return None
+    supported_modes = get_ck_tile_bfloat16_supported_modes(ck_dir)
+    return "5" if "5" in supported_modes else "0"
+
+
+def maybe_prepare_fmha_bfloat16_build(
+    flags_hip: list[str], blob_gen_cmd, ck_dir: str, targets: list[str]
+) -> tuple[list[str], Optional[str]]:
+    if not _uses_ck_fmha_codegen(blob_gen_cmd):
+        return flags_hip, None
+
+    if os.environ.get("CK_TILE_FLOAT_TO_BFLOAT16_DEFAULT") is not None:
+        return flags_hip, None
+
+    if not _has_rdna_ck_targets(targets):
+        return flags_hip, None
+
+    # Match flash-attn on RDNA: use mode 3 for non-generated FMHA translation
+    # units, then override generated gfx11/gfx12 blobs to mode 5 when the CK
+    # revision supports it, otherwise mode 0.
+    flags_hip = _replace_define_flag(
+        flags_hip, "CK_TILE_FLOAT_TO_BFLOAT16_DEFAULT", "3"
+    )
+    generated_override = get_generated_rdna_bfloat16_override(targets, ck_dir)
+    if generated_override != "5":
+        logger.warning(
+            "Current composable_kernel does not support BF16 conversion mode 5; "
+            f"falling back to mode {generated_override} for gfx11/gfx12 generated FMHA blobs."
+        )
+    return flags_hip, generated_override
+
+
+def apply_generated_rdna_bfloat16_override(blob_dir: str, override: str) -> int:
+    generated_blob_pattern = re.compile(r"_gfx1[12][^/]*\.(?:cpp|cu)$")
+    existing_prefix_pattern = re.compile(
+        r"^(#undef CK_TILE_FLOAT_TO_BFLOAT16_DEFAULT\r?\n"
+        r"#define CK_TILE_FLOAT_TO_BFLOAT16_DEFAULT \d+\r?\n)"
+    )
+    prefix = (
+        "#undef CK_TILE_FLOAT_TO_BFLOAT16_DEFAULT\n"
+        f"#define CK_TILE_FLOAT_TO_BFLOAT16_DEFAULT {override}\n"
+    )
+    patched = 0
+    for root, _, files in os.walk(blob_dir):
+        for name in files:
+            if not name.startswith(("fmha_fwd", "fmha_bwd")):
+                continue
+            if not generated_blob_pattern.search(name):
+                continue
+            path = os.path.join(root, name)
+            with open(path, "r", encoding="utf-8") as f:
+                original = f.read()
+            if existing_prefix_pattern.match(original):
+                updated = existing_prefix_pattern.sub(prefix, original, count=1)
+            else:
+                updated = prefix + original
+            if updated != original:
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write(updated)
+                patched += 1
+    return patched
+
+
 @functools.lru_cache()
 def hip_flag_checker(flag_hip: str) -> bool:
     import subprocess
@@ -807,6 +931,11 @@ def build_module(
 
         flags_cc += flags_extra_cc
         flags_hip += flags_extra_hip
+        flags_hip, generated_rdna_bfloat16_override = (
+            maybe_prepare_fmha_bfloat16_build(
+                flags_hip, blob_gen_cmd, CK_DIR, get_gfx_list()
+            )
+        )
         archs = validate_and_update_archs()
         flags_hip += [f"--offload-arch={arch}" for arch in archs]
         flags_hip = sorted(set(flags_hip))  # remove same flags
@@ -820,6 +949,17 @@ def build_module(
                 if AITER_LOG_MORE:
                     logger.info(f"exec_blob ---> {PY} {blob_gen_cmd.format(blob_dir)}")
                 os.system(f"{PY} {blob_gen_cmd.format(blob_dir)}")
+                if generated_rdna_bfloat16_override is not None:
+                    patched = apply_generated_rdna_bfloat16_override(
+                        blob_dir, generated_rdna_bfloat16_override
+                    )
+                    if patched > 0 and AITER_LOG_MORE:
+                        logger.info(
+                            "patched %s gfx11/gfx12 generated FMHA blobs with "
+                            "CK_TILE_FLOAT_TO_BFLOAT16_DEFAULT=%s",
+                            patched,
+                            generated_rdna_bfloat16_override,
+                        )
                 sources += rename_cpp_to_cu([blob_dir], src_dir, hipify, recursive=True)
             return sources
 
