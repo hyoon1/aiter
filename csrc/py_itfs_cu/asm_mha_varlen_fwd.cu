@@ -16,6 +16,7 @@ mha_fwd_args get_asm_mha_varlen_fwd_args(bool has_lse,
                                           // sizes
                                           const int b,
                                           const int max_seqlen_q,
+                                          const int max_seqlen_k,
                                           const int h,
                                           const int h_k,
                                           const int d,
@@ -235,7 +236,8 @@ mha_fwd_args get_asm_mha_varlen_fwd_args(bool has_lse,
                         has_dropout_randval,
                         drop_seed_offset,
                         128, // block_scale_size_q
-                        128}; // block_scale_size_kv
+                        128, // block_scale_size_kv
+                        max_seqlen_k};
 }
 
 
@@ -462,6 +464,7 @@ fmha_v3_varlen_fwd(at::Tensor &q,                  // [total_q, hq, d]
                 mask,
                 batch_size,
                 max_seqlen_q,
+                max_seqlen_k,
                 num_heads,
                 num_heads_k,
                 head_size_q,

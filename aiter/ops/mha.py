@@ -11,6 +11,7 @@ from ..jit.utils.chip_info import get_gfx
 from ..jit.utils.torch_guard import torch_compile_guard
 from ..jit.utils.mha_recipes import (
     compose_mha_fwd_variant_suffix_and_filter,
+    get_ck_codegen_targets_csv,
     get_mha_varlen_prebuild_variants_by_names,
 )
 from ..utility import dtypes
@@ -39,6 +40,7 @@ def cmdGenFunc_mha_fwd(
     sink_ptr: Optional[Tensor] = None,
     gen: Optional[Generator] = None,
 ):
+    targets_csv = get_ck_codegen_targets_csv()
     _, seqlen_q, _, _ = q.shape
     # causal=true is the same as causal=false in this case
     causal = is_causal
@@ -96,7 +98,7 @@ def cmdGenFunc_mha_fwd(
 
     blob_gen_cmd = [
         f"{CK_DIR}/example/ck_tile/01_fmha/generate.py -d fwd "
-        "--receipt 100 --filter {} --output_dir {{}}".format(filter),
+        f"--targets {targets_csv} --receipt 100 --filter {filter} --output_dir {{}}",
     ]
     return {
         "md_name": md_name,
@@ -301,6 +303,7 @@ def cmdGenFunc_mha_varlen_fwd(
     cu_seqlens_k_padded: Optional[torch.Tensor] = None,
     sink_ptr: Optional[torch.Tensor] = None,
 ):
+    targets_csv = get_ck_codegen_targets_csv()
     # causal=true is the same as causal=false in this case
     causal = is_causal
     if max_seqlen_q == 1 and alibi_slopes is None:
@@ -388,11 +391,11 @@ def cmdGenFunc_mha_varlen_fwd(
         filter_fwd_splitkv = f"{filter_fwd_splitkv1}@{filter_fwd_splitkv2}"
         blob_gen_cmd = [
             f"{CK_DIR}/example/ck_tile/01_fmha/generate.py -d fwd "
-            "--receipt 200 --filter {} --output_dir {{}}".format('" "')
+            f'--targets {targets_csv} --receipt 200 --filter " " --output_dir {{}}'
         ]
         blob_gen_cmd.append(
             f"{CK_DIR}/example/ck_tile/01_fmha/generate.py -d fwd_splitkv "
-            "--receipt 200 --filter {} --output_dir {{}}".format(filter_fwd_splitkv)
+            f"--targets {targets_csv} --receipt 200 --filter {filter_fwd_splitkv} --output_dir {{}}"
         )
     return {
         "md_name": md_name,
@@ -627,6 +630,7 @@ def cmdGenFunc_mha_bwd(
     sink: Optional[Tensor] = None,
     d_sink: Optional[Tensor] = None,
 ):
+    targets_csv = get_ck_codegen_targets_csv()
     md_name = "mha_bwd"
     filter1 = "*"  # get_bwd_dot_do_o_blobs()
     filter2 = "*"  # get_bwd_convert_dq_blobs()
@@ -681,7 +685,7 @@ def cmdGenFunc_mha_bwd(
 
     blob_gen_cmd = [
         f"{CK_DIR}/example/ck_tile/01_fmha/generate.py -d bwd "
-        "--receipt 300 --filter {} --output_dir {{}}".format(filter),
+        f"--targets {targets_csv} --receipt 300 --filter {filter} --output_dir {{}}",
         f"{AITER_META_DIR}/hsa/codegen.py -m fmha_v3_bwd --output_dir {{}}",
     ]
     return {
@@ -895,6 +899,7 @@ def cmdGenFunc_mha_varlen_bwd(
     sink: Optional[Tensor] = None,
     d_sink: Optional[Tensor] = None,
 ) -> dict[str, Any]:
+    targets_csv = get_ck_codegen_targets_csv()
     md_name = "mha_varlen_bwd"
     filter1 = "*"  # get_bwd_dot_do_o_blobs()
     filter2 = "*"  # get_bwd_convert_dq_blobs()
@@ -939,7 +944,7 @@ def cmdGenFunc_mha_varlen_bwd(
 
     blob_gen_cmd = [
         f"{CK_DIR}/example/ck_tile/01_fmha/generate.py -d bwd "
-        "--receipt 400 --filter {} --output_dir {{}}".format(filter),
+        f"--targets {targets_csv} --receipt 400 --filter {filter} --output_dir {{}}",
         f"{AITER_META_DIR}/hsa/codegen.py -m fmha_v3_bwd --output_dir {{}}",
     ]
     return {
@@ -983,6 +988,7 @@ def cmdGenFunc_mha_batch_prefill(
     block_table: Optional[Tensor] = None,
     seqlen_k: Optional[Tensor] = None,
 ):
+    targets_csv = get_ck_codegen_targets_csv()
     # causal=true is the same as causal=false in this case
     causal = is_causal
     if max_seqlen_q == 1 and alibi_slopes is None:
@@ -1048,7 +1054,7 @@ def cmdGenFunc_mha_batch_prefill(
         filter_fwd += "_pertensor*"
     blob_gen_cmd = [
         f"{CK_DIR}/example/ck_tile/01_fmha/generate.py -d batch_prefill "
-        "--receipt 200 --filter {} --output_dir {{}}".format(filter_fwd)
+        f"--targets {targets_csv} --receipt 200 --filter {filter_fwd} --output_dir {{}}"
     ]
     return {
         "md_name": md_name,
@@ -1298,7 +1304,8 @@ def _flash_attn_forward(
 
     def can_impl_fmha_v3_fwd():
         # basic
-        ret = alibi_slopes is None
+        ret = get_gfx() in ("gfx942", "gfx950")
+        ret = ret and (alibi_slopes is None)
         ret = ret and (bias is None)
         ret = ret and (dropout_p == 0.0)
         ret = ret and (hdim_v == 128)
@@ -2079,7 +2086,8 @@ def _flash_attn_varlen_forward(
 
     def can_impl_fmha_v3_fwd():
         # basic
-        ret = alibi_slopes is None
+        ret = get_gfx() in ("gfx942", "gfx950")
+        ret = ret and (alibi_slopes is None)
         ret = ret and (bias is None)
         ret = ret and (dropout_p == 0.0)
         ret = ret and (hdim_v == 128)
@@ -2141,6 +2149,15 @@ def _flash_attn_varlen_forward(
             _validate("cu_seqlens_q_padded", cu_seqlens_q_padded)
         if cu_seqlens_k_padded is not None:
             _validate("cu_seqlens_k_padded", cu_seqlens_k_padded)
+        effective_min_seqlen_q = min_seqlen_q
+        current_gfx = get_gfx()
+        if min_seqlen_q != 0 and current_gfx.startswith(("gfx11", "gfx12")):
+            # gfx9 asm v3 does not implement the CK _skip semantics.
+            # Keep gfx11/12 CK aligned with that behavior when a launch would
+            # otherwise skip one or more short query sequences entirely.
+            query_lens = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
+            if bool(torch.any(query_lens <= min_seqlen_q).item()):
+                effective_min_seqlen_q = 0
         out, softmax_lse, S_dmask, rng_state = mha_varlen_fwd(
             q,
             k,
@@ -2149,7 +2166,7 @@ def _flash_attn_varlen_forward(
             cu_seqlens_k,
             max_seqlen_q,
             max_seqlen_k,
-            min_seqlen_q,
+            effective_min_seqlen_q,
             dropout_p,
             softmax_scale,
             logits_soft_cap,

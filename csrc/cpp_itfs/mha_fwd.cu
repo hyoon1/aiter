@@ -1,5 +1,8 @@
 #include "mha_fwd.h"
 #include "aiter_hip_common.h"
+#if FAV2_ON
+#include "mha_fwd_head_grouping_utils.hpp"
+#endif
 #if FAV3_ON
 #include "asm_fmha_v3_fwd_configs.hpp"
 #endif
@@ -357,7 +360,30 @@ float fmha_fwd_ck(mha_fwd_args a, const ck_tile::stream_config& s)
                        a.block_scale_size_q,
                        a.block_scale_size_kv};
 
-    return fmha_fwd(traits, args, s);
+    const ck_tile::index_t grouping_seqlen_k =
+        a.max_seqlen_k > 0 ? a.max_seqlen_k : a.seqlen_k;
+
+    float t = maybe_dispatch_head_grouped_fwd(
+        s,
+        traits,
+        args,
+        a.nhead_q,
+        a.nhead_k,
+        a.batch,
+        grouping_seqlen_k,
+        a.hdim_q,
+        a.hdim_v,
+        get_element_size_from_dtype_string(a.data_type),
+        get_element_size_from_dtype_string(a.data_type),
+        a.data_type,
+        [&](const auto& grouped_traits, auto& grouped_args, const auto& grouped_sc) {
+            return fmha_fwd(grouped_traits, grouped_args, grouped_sc);
+        });
+    if(t < 0.0f)
+    {
+        t = fmha_fwd(traits, args, s);
+    }
+    return t;
 }
 #endif
 

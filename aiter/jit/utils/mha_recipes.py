@@ -1,4 +1,13 @@
-from typing import List, Dict, Tuple
+import functools
+from typing import Dict, List, Tuple
+
+from .chip_info import get_gfx_list
+
+
+@functools.lru_cache(maxsize=1)
+def get_ck_codegen_targets_csv() -> str:
+    """Return CK codegen targets in the comma-separated form generate.py expects."""
+    return ",".join(get_gfx_list())
 
 
 def compose_mha_fwd_variant_suffix_and_filter(
@@ -80,6 +89,7 @@ def get_mha_varlen_prebuild_variants_by_names(
     md_names: List[str], ck_dir: str, receipt: int = 200
 ) -> List[Dict]:
     variants: List[Dict] = []
+    targets_csv = get_ck_codegen_targets_csv()
     for md_name in md_names:
         (
             dtype,
@@ -104,8 +114,8 @@ def get_mha_varlen_prebuild_variants_by_names(
             has_qscale=has_qscale,
         )
         blob_gen_cmd = [
-            f"{ck_dir}/example/ck_tile/01_fmha/generate.py -d fwd --receipt {receipt} --filter {filter_pattern} --output_dir {{}}",
-            f'{ck_dir}/example/ck_tile/01_fmha/generate.py -d fwd_splitkv --receipt {receipt} --filter " @ " --output_dir {{}}',
+            f"{ck_dir}/example/ck_tile/01_fmha/generate.py -d fwd --targets {targets_csv} --receipt {receipt} --filter {filter_pattern} --output_dir {{}}",
+            f'{ck_dir}/example/ck_tile/01_fmha/generate.py -d fwd_splitkv --targets {targets_csv} --receipt {receipt} --filter " @ " --output_dir {{}}',
         ]
         variants.append(
             {"md_name": f"mha_varlen_fwd{suffix}", "blob_gen_cmd": blob_gen_cmd}

@@ -242,6 +242,7 @@ struct mha_fwd_args
 
     ck_tile::index_t block_scale_size_q;
     ck_tile::index_t block_scale_size_kv;
+    ck_tile::index_t max_seqlen_k = 0;
 };
 
 #if ENABLE_CK

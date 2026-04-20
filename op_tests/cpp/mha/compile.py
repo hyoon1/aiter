@@ -9,12 +9,22 @@ import argparse
 this_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, f"{this_dir}/../../../aiter/")
 from jit.core import compile_ops, CK_DIR, AITER_CSRC_DIR, AITER_META_DIR  # noqa: E402
+from jit.utils.chip_info import get_gfx_list  # noqa: E402
 
 FWD_CODEGEN_CMD = [f"{AITER_META_DIR}/hsa/codegen.py -m fmha_v3_fwd --output_dir {{}}"]
 BWD_CODEGEN_CMD = [f"{AITER_META_DIR}/hsa/codegen.py -m fmha_v3_bwd --output_dir {{}}"]
 
 
+def get_ck_codegen_targets_csv():
+    return ",".join(get_gfx_list())
+
+
+def has_rdna_ck_targets():
+    return any(target.startswith(("gfx11", "gfx12")) for target in get_gfx_list())
+
+
 def cmdGenFunc_mha_fwd(ck_exclude: bool):
+    targets_csv = get_ck_codegen_targets_csv()
     if ck_exclude:
         srcs = [f"{AITER_CSRC_DIR}/cpp_itfs/mha_fwd.cu"]
         blob_gen_cmd = []
@@ -22,13 +32,18 @@ def cmdGenFunc_mha_fwd(ck_exclude: bool):
         srcs = [
             f"{AITER_CSRC_DIR}/cpp_itfs/mha_fwd.cu",
             f"{AITER_CSRC_DIR}/cpp_itfs/mha_fwd_split.cu",
-            f"{AITER_CSRC_DIR}/cpp_itfs/mha_fwd_batch_prefill.cu",
         ]
         blob_gen_cmd = [
-            f"{CK_DIR}/example/ck_tile/01_fmha/generate.py -d fwd --receipt 600 --output_dir {{}}",
-            f"{CK_DIR}/example/ck_tile/01_fmha/generate.py -d fwd_splitkv --receipt 600 --output_dir {{}}",
-            f"{CK_DIR}/example/ck_tile/01_fmha/generate.py -d batch_prefill --receipt 600 --output_dir {{}}",
+            f"{CK_DIR}/example/ck_tile/01_fmha/generate.py -d fwd --targets {targets_csv} --receipt 600 --output_dir {{}}",
+            f"{CK_DIR}/example/ck_tile/01_fmha/generate.py -d fwd_splitkv --targets {targets_csv} --receipt 600 --output_dir {{}}",
         ]
+        # The current CK batch_prefill receipt-600 blobs still fail to compile on gfx11/12.
+        # Keep the forward/splitkv C++ API benchmark path usable there.
+        if not has_rdna_ck_targets():
+            srcs.append(f"{AITER_CSRC_DIR}/cpp_itfs/mha_fwd_batch_prefill.cu")
+            blob_gen_cmd.append(
+                f"{CK_DIR}/example/ck_tile/01_fmha/generate.py -d batch_prefill --targets {targets_csv} --receipt 600 --output_dir {{}}"
+            )
     blob_gen_cmd.extend(FWD_CODEGEN_CMD)
     flag_use_v3 = (
         "-DFAV3_ON=1 -DENABLE_CK=0" if ck_exclude else "-DFAV3_ON=1 -DFAV2_ON=1"
@@ -52,11 +67,12 @@ def compile_mha_fwd(ck_exclude: bool): ...
 
 
 def cmdGenFunc_mha_bwd(ck_exclude: bool):
+    targets_csv = get_ck_codegen_targets_csv()
     if ck_exclude:
         blob_gen_cmd = []
     else:
         blob_gen_cmd = [
-            f"{CK_DIR}/example/ck_tile/01_fmha/generate.py -d bwd --receipt 600 --output_dir {{}}",
+            f"{CK_DIR}/example/ck_tile/01_fmha/generate.py -d bwd --targets {targets_csv} --receipt 600 --output_dir {{}}",
         ]
     blob_gen_cmd.extend(BWD_CODEGEN_CMD)
     flags_extra_cc = ["-DONLY_FAV3", "-DENABLE_CK=0"] if ck_exclude else []

@@ -205,7 +205,8 @@ mha_fwd_args get_asm_fmha_fwd_args(bool has_lse,
                         has_dropout_randval,
                         drop_seed_offset,
                         128, // block_scale_size_q (per-block quantization block size)
-                        128}; // block_scale_size_kv (per-block quantization block size)
+                        128, // block_scale_size_kv (per-block quantization block size)
+                        seqlen_k};
 }
 
 std::vector<at::Tensor> fmha_v3_fwd(at::Tensor &q, // [b, sq, hq, d]
